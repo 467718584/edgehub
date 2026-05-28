@@ -7,6 +7,7 @@
 | EdgeHub Server | 3.0.x | 边缘设备管理核心服务 |
 | EdgeAgent (RK3588) | 3.0.1 | 设备端 WebSocket 客户端 |
 | 协议 | EHP v1.0 | EdgeHub Protocol |
+| **最后更新** | **2026-05-28** | WireGuard + EdgeAgent 完全打通 |
 
 ## 系统架构
 
@@ -15,16 +16,17 @@
 │                      EdgeHub Server                         │
 │                   (1.13.247.173:8080)                       │
 │  ┌──────────┐  ┌──────────────┐  ┌────────────────────┐   │
-│  │ REST API │  │ WebSocket    │  │ Command Queue      │   │
-│  │ /api/v1  │  │ /ws          │  │ delivered_via_ws   │   │
+│  │ REST API │  │ WebSocket   │  │ Command Queue      │   │
+│  │ /api/v1  │  │ /ws          │  │ delivered_via_ws    │   │
 │  └──────────┘  └──────────────┘  └────────────────────┘   │
 └─────────────────────────────────────────────────────────────┘
               ↑              ↑              ↑
               │ WebSocket    │              │ REST / callbacks
               │              │              │
 ┌─────────────┴──┐   ┌───────┴──────┐   ┌───┴──────────────┐
-│   RK3588       │   │  Windows     │   │  Other Devices   │
-│ EdgeAgent v3.0 │   │  Device      │   │                  │
+│   RK3588       │   │  Windows    │   │  Other Devices  │
+│ EdgeAgent v3.0 │   │  Device      │   │                 │
+│ ✅ ONLINE       │   │  ✅ ONLINE   │   │                 │
 └────────────────┘   └──────────────┘   └──────────────────┘
 ```
 
@@ -37,22 +39,22 @@
 | `src/app.js` | 3.0.x | EdgeHub 主服务，global.db 挂载修复 |
 | `src/models/database.js` | 3.0.x | 数据库模型，updateDeviceStatus + last_heartbeat 修复 |
 | `src/services/commandQueueService.js` | 3.0.x | 命令队列，WS 优先推送逻辑 |
-| `src/utils/ws-server.js` | 3.0.x | WebSocket 服务，支持 WS 命令推送 + device_status 处理 |
+| `src/utils/ws-server.js` | 3.0.x | WebSocket 服务，路径 `/ws` |
 | `web/js/app.js` | 3.0.x | 前端渲染，loadDeviceDetail sysinfo JSON 解析修复 |
 
 ### 设备端 (`/var/www/html/`)
 
 | 文件名 | 版本 | 说明 |
 |-------|------|------|
-| `edgeagent-ws-v3.py` | 3.0.1 | RK3588 EdgeAgent，WebSocket 原生模式 + SysInfo 上报 |
-| `edgeagent-install.sh` | 3.0.x | RK3588 一键安装脚本 |
+| `edgeagent-ws-v3.py` | 3.0.1 | RK3588 EdgeAgent，WebSocket 原生模式 |
+| `edgeagent-full-start-rk3588.sh` | 3.0.1 | 一键启动脚本(WireGuard + EdgeAgent) |
 
-### 配置文件
+### 一键启动脚本
 
-| 文件 | 说明 |
-|------|------|
-| `/etc/nginx/sites-enabled/edgehub` | Nginx 反向代理 + WebSocket 支持 |
-| `/etc/systemd/system/edgeagent.service` | RK3588 systemd 服务 |
+**在RK3588上执行（sudo）：**
+```bash
+curl -s http://1.13.247.173/edgeagent-full-start-rk3588.sh | sudo bash
+```
 
 ## 功能特性
 
@@ -108,12 +110,10 @@ curl -X POST -H "X-API-Key: edgehub_secret_key" \
 
 ## 安装部署
 
-### RK3588 设备端
+### RK3588 设备端（一键启动）
 
 ```bash
-curl -O http://1.13.247.173/edgeagent-install.sh
-chmod +x edgeagent-install.sh
-sudo ./edgeagent-install.sh
+curl -s http://1.13.247.173/edgeagent-full-start-rk3588.sh | sudo bash
 ```
 
 ### 手动更新 EdgeAgent
@@ -155,6 +155,12 @@ db.getCommandsByDevice('82b2731d58533598', null, 5).then(cs => {
 
 ## 版本历史
 
+### v3.0.2 (2026-05-28) 🎉
+- **WireGuard + EdgeAgent 完全打通**
+- RK3588 设备状态: **online**
+- WebSocket 路径修正: `/ws` 而非 `/ws/device`
+- 一键启动脚本: `edgeagent-full-start-rk3588.sh`
+
 ### v3.0.1 (2026-05-27)
 - EdgeAgent 完整 sysinfo 上报 (CPU/内存/磁盘/负载/运行时间)
 - 前端 loadDeviceDetail JSON.parse 修复
@@ -171,8 +177,47 @@ db.getCommandsByDevice('82b2731d58533598', null, 5).then(cs => {
 
 ## 已知问题
 
-1. **设备状态 offline** - WebSocket 连接不稳定时状态会变 offline，但命令仍可通过 WS 推送
+1. ~~**设备状态 offline**~~ - ✅ 已解决 (2026-05-28)
 2. **CPU usage 显示 0** - 首次上报时无历史数据，下一个周期恢复正常
+
+## 经验教训 (2026-05-28)
+
+### 为什么昨晚正常今天不行？
+
+1. **服务器重启导致WireGuard配置丢失**
+   - 配置未持久化到/etc/wireguard/
+   - wg-quick up只读取配置文件，重启后需重新加载
+
+2. **密钥对不匹配**
+   - 服务器重新生成私钥/公钥对
+   - 但RK3588仍使用旧的服务器公钥
+
+3. **多层面问题叠加**
+   - WireGuard连接问题 → 命令无法下发
+   - WebSocket路径问题 → EdgeAgent注册失败
+   - 配置格式问题 → WireGuard无法启动
+   - 权限问题 → EdgeAgent崩溃
+
+### 关键教训
+
+1. **WireGuard配置必须持久化并开机自启**
+   - 使用`systemctl enable wg-quick@wg0`
+   - 确保/etc/wireguard/wg0.conf存在且正确
+
+2. **密钥对必须同步更新**
+   - 服务器密钥对变更后，所有客户端公钥必须同步更新
+
+3. **配置文件写入后必须验证**
+   - 使用cat/tail验证文件内容
+   - 确认无多余字符（特别是`=`和引号）
+
+4. **WebSocket路径必须是/ws而非/ws/device**
+   - 参数通过query string传递
+   - `ws://10.0.0.1:8080/ws?device_id=xxx&api_key=xxx`
+
+5. **权限问题必须提前检查**
+   - 创建必要的目录并设置正确权限
+   - sudo执行启动脚本
 
 ## 目录结构
 
@@ -189,7 +234,8 @@ db.getCommandsByDevice('82b2731d58533598', null, 5).then(cs => {
 
 /var/www/html/
 ├── edgeagent-ws-v3.py          # 设备端Agent
-└── edgeagent-install.sh         # 安装脚本
+├── edgeagent-full-start-rk3588.sh  # 一键启动脚本
+└── edgeagent-install.sh        # 安装脚本
 ```
 
 ## 连接信息
@@ -197,3 +243,5 @@ db.getCommandsByDevice('82b2731d58533598', null, 5).then(cs => {
 - 服务器: 1.13.247.173
 - API Key: `edgehub_secret_key`
 - 设备ID (RK3588): `82b2731d58533598`
+- WireGuard VPN IP: 10.0.0.3 (RK3588) / 10.0.0.1 (服务器)
+- WebSocket URL: `ws://10.0.0.1:8080/ws?device_id=82b2731d58533598&api_key=edgehub_secret_key`
